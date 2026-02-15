@@ -8,6 +8,13 @@ It supports both MediaPipe APIs:
 - Older API: `mp.solutions.hands`
 - Newer API: `mp.tasks.vision.HandLandmarker` (used on Python 3.13+ builds where `mp.solutions` is unavailable)
 
+## Code Layout
+
+- `hand_skeleton_component.py`: entrypoint (CLI run target)
+- `gesture_config.py`: runtime config + argument parsing
+- `camera_utils.py`: camera backend probing/open helpers
+- `hand_skeleton_app.py`: hand-tracking app logic, gesture state, rendering
+
 ## Setup
 
 ```bash
