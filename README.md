@@ -14,6 +14,9 @@ It supports both MediaPipe APIs:
 - `gesture_config.py`: runtime config + argument parsing
 - `camera_utils.py`: camera backend probing/open helpers
 - `hand_skeleton_app.py`: hand-tracking app logic, gesture state, rendering
+- `mini_game.py`: Ping Pong game mode logic
+- `sign_mode.py`: Sign Language learner/practice mode controller
+- `sign_curriculum.py`: built-in words/sentences for sign lessons
 
 ## Setup
 
@@ -78,8 +81,84 @@ Notes:
 
 - `q` or `Esc`: quit
 - `n`: toggle landmark ID labels (0..20)
+- `c`: toggle counters/HUD overlay
+- `1`: toggle Ping Pong game mode on/off
+- `2`: switch game to `Two Player` mode
+- `3`: switch game to `Bot` mode
+- `4`: toggle `Sign Language` mode on/off
+- `r`: reset Ping Pong score (when game mode is active)
 
 The display is fixed to selfie-style mirror mode so your left hand appears on the left side of the screen.
+
+## Ping Pong Game
+
+The app includes a basic pong-style game in game mode:
+
+- Left paddle and right paddle move only vertically.
+- Power-ups spawn from center and move toward left/right sides with weighted-random fairness.
+- Paddle-touch pickup model:
+  - touching a power-up with your paddle activates it for that side.
+  - missed power-ups leave the court and are lost.
+- Power-ups implemented:
+  - `Speed Ball`: next hit from that side launches a very fast shot.
+  - `Paddle Size`: paddle grows for ~5 seconds.
+  - `Shield`: one-time wall save; missed ball reflects instead of conceding.
+  - `Chaos Orb`: next hit adds a random directional chaos offset.
+- `Two Player` mode:
+  - waits for two tracked hands before starting.
+  - shows detected hand combination (right/left counts) before kickoff.
+  - left-most visible hand controls left paddle; right-most controls right paddle.
+- `Bot` mode:
+  - one visible hand controls left paddle.
+  - right paddle is controlled by a bot.
+
+## Sign Language Mode
+
+Press `4` to enter Sign Language mode.
+
+### Menu
+
+- `Learner Mode`
+- `Practice Mode`
+
+Buttons can be clicked using:
+
+- hand pinch click (`index + thumb` at cursor position)
+- mouse click fallback
+
+Press `4` again to exit Sign mode back to plain view.
+
+### Learner Mode
+
+Includes three levels:
+
+- `Level 1`: Alphabet drill (single letter with reference image)
+- `Level 2`: Word building (letter-by-letter progression with reference image)
+- `Level 3`: Sentence building (word-style flow with spaces auto-skipped)
+
+Each letter has a blank above it. Correct answer turns blank into a tick and advances.
+
+### Practice Mode
+
+- Uses sentence prompts
+- No reference image shown
+- Per-letter feedback:
+  - wrong stable sign -> cross
+  - correct stable sign -> tick and advance
+
+### Template Images
+
+Sign template images are loaded from:
+
+- `assets/signs/alphabet`
+
+See details and naming rules in:
+
+- `assets/signs/alphabet/README.md`
+
+The matcher currently supports static letters:
+
+- `A-I` and `K-Y` (motion letters `J` and `Z` are excluded in v1)
 
 ## Pinch Counters
 
