@@ -23,6 +23,13 @@ class ViewerConfig:
     min_tracking_confidence: float = 0.5
     show_landmark_ids: bool = False
     model_path: str | None = None
+    touchdesigner_osc: bool = False
+    td_host: str = "127.0.0.1"
+    td_port: int = 9000
+    td_send_landmarks: bool = False
+    sign_hold_frames: int = 10
+    sign_confidence_threshold: float = 5.5
+    sign_max_custom_samples: int = 20
 
 
 def parse_args() -> ViewerConfig:
@@ -114,6 +121,46 @@ def parse_args() -> ViewerConfig:
         action="store_true",
         help="Draw numeric IDs for each hand landmark",
     )
+    parser.add_argument(
+        "--touchdesigner-osc",
+        action="store_true",
+        help="Enable OSC output stream for TouchDesigner",
+    )
+    parser.add_argument(
+        "--td-host",
+        type=str,
+        default="127.0.0.1",
+        help="TouchDesigner OSC host (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--td-port",
+        type=int,
+        default=9000,
+        help="TouchDesigner OSC port (default: 9000)",
+    )
+    parser.add_argument(
+        "--td-send-landmarks",
+        action="store_true",
+        help="Also stream all 21 normalized landmarks per hand over OSC",
+    )
+    parser.add_argument(
+        "--sign-hold-frames",
+        type=int,
+        default=10,
+        help="Frames required for stable sign confirmation (default: 10)",
+    )
+    parser.add_argument(
+        "--sign-confidence-threshold",
+        type=float,
+        default=5.5,
+        help="Sign confidence threshold in 0..10 scale (default: 5.5)",
+    )
+    parser.add_argument(
+        "--sign-max-custom-samples",
+        type=int,
+        default=20,
+        help="Maximum saved fine-tune samples per letter (default: 20)",
+    )
     args = parser.parse_args()
 
     return ViewerConfig(
@@ -133,4 +180,11 @@ def parse_args() -> ViewerConfig:
         min_tracking_confidence=args.min_track_confidence,
         show_landmark_ids=args.show_landmark_ids,
         model_path=args.model_path,
+        touchdesigner_osc=args.touchdesigner_osc,
+        td_host=args.td_host,
+        td_port=max(1, min(65535, int(args.td_port))),
+        td_send_landmarks=args.td_send_landmarks,
+        sign_hold_frames=max(2, min(30, int(args.sign_hold_frames))),
+        sign_confidence_threshold=max(0.5, min(9.5, float(args.sign_confidence_threshold))),
+        sign_max_custom_samples=max(1, min(200, int(args.sign_max_custom_samples))),
     )

@@ -45,6 +45,7 @@ from camera_utils import list_available_cameras, try_open_capture
 from gesture_config import ViewerConfig
 from mini_game import PingPongGame
 from sign_mode import SignLanguageMode
+from touchdesigner_bridge import TouchDesignerOSCBridge
 
 
 DEFAULT_MODEL_URL = (
@@ -85,6 +86,9 @@ class HandSkeletonComponent:
         self._window_name = "Hand Skeleton Component"
         self._pending_mouse_click: tuple[int, int] | None = None
         self._last_output_size: tuple[int, int] = (0, 0)
+        self._last_display_size: tuple[int, int] = (0, 0)
+        self._last_cover_transform: tuple[float, float, float] = (1.0, 0.0, 0.0)
+        self._is_fullscreen = False
         self.sign_mode: SignLanguageMode | None = None
         self.template_hands = None
         self.template_landmarker = None
@@ -96,7 +100,18 @@ class HandSkeletonComponent:
             self._init_tasks_backend()
 
         self._init_template_extractors()
-        self.sign_mode = SignLanguageMode(self._extract_template_landmarks_from_image)
+        self.sign_mode = SignLanguageMode(
+            self._extract_template_landmarks_from_image,
+            hold_min_frames=self.config.sign_hold_frames,
+            confidence_threshold_score=self.config.sign_confidence_threshold,
+            max_custom_samples_per_letter=self.config.sign_max_custom_samples,
+        )
+        self.td_bridge = TouchDesignerOSCBridge(
+            enabled=self.config.touchdesigner_osc,
+            host=self.config.td_host,
+            port=self.config.td_port,
+            send_landmarks=self.config.td_send_landmarks,
+        )
 
     @staticmethod
     def _detect_backend() -> str:
@@ -253,22 +268,78 @@ class HandSkeletonComponent:
 
     def _on_mouse_event(self, event, x, y, _flags, _param) -> None:
         if event == cv2.EVENT_LBUTTONDOWN:
-            click_x = int(x)
-            click_y = int(y)
+            disp_x = float(x)
+            disp_y = float(y)
 
-            # Map window-space coordinates into frame-space coordinates when
-            # OpenCV window scaling (retina / resize) is active.
-            frame_w, frame_h = self._last_output_size
-            if frame_w > 0 and frame_h > 0:
+            # Normalize callback coords into display-image pixel space first.
+            disp_w, disp_h = self._last_display_size
+            if disp_w > 0 and disp_h > 0:
                 try:
                     _, _, win_w, win_h = cv2.getWindowImageRect(self._window_name)
                 except Exception:
                     win_w, win_h = 0, 0
                 if win_w > 0 and win_h > 0:
-                    click_x = int(click_x * (frame_w / float(win_w)))
-                    click_y = int(click_y * (frame_h / float(win_h)))
+                    disp_x = disp_x * (disp_w / float(win_w))
+                    disp_y = disp_y * (disp_h / float(win_h))
 
+            # Map display-space coordinates back to original frame-space using
+            # the same cover transform used for fullscreen rendering.
+            frame_w, frame_h = self._last_output_size
+            if frame_w > 0 and frame_h > 0:
+                scale, crop_x, crop_y = self._last_cover_transform
+                click_x = int((disp_x + crop_x) / max(scale, 1e-6))
+                click_y = int((disp_y + crop_y) / max(scale, 1e-6))
+                click_x = max(0, min(frame_w - 1, click_x))
+                click_y = max(0, min(frame_h - 1, click_y))
+            else:
+                click_x = int(disp_x)
+                click_y = int(disp_y)
             self._pending_mouse_click = (click_x, click_y)
+
+    def _fit_output_to_window(self, output):
+        """Cover-fit output to window (fill fully, crop overflow, no letterboxing)."""
+        try:
+            _, _, win_w, win_h = cv2.getWindowImageRect(self._window_name)
+        except Exception:
+            self._last_cover_transform = (1.0, 0.0, 0.0)
+            return output
+
+        if win_w <= 0 or win_h <= 0:
+            self._last_cover_transform = (1.0, 0.0, 0.0)
+            return output
+
+        frame_h, frame_w = output.shape[:2]
+        if frame_w <= 0 or frame_h <= 0:
+            self._last_cover_transform = (1.0, 0.0, 0.0)
+            return output
+
+        scale = max(win_w / float(frame_w), win_h / float(frame_h))
+        scaled_w = max(1, int(round(frame_w * scale)))
+        scaled_h = max(1, int(round(frame_h * scale)))
+
+        interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+        resized = cv2.resize(output, (scaled_w, scaled_h), interpolation=interp)
+
+        crop_x = max(0, (scaled_w - win_w) // 2)
+        crop_y = max(0, (scaled_h - win_h) // 2)
+        cropped = resized[crop_y : crop_y + win_h, crop_x : crop_x + win_w]
+
+        self._last_cover_transform = (scale, float(crop_x), float(crop_y))
+        return cropped
+
+    def _set_fullscreen(self, enabled: bool) -> None:
+        if not hasattr(cv2, "WND_PROP_FULLSCREEN"):
+            return
+        mode = cv2.WINDOW_FULLSCREEN if enabled else cv2.WINDOW_NORMAL
+        try:
+            cv2.setWindowProperty(
+                self._window_name,
+                cv2.WND_PROP_FULLSCREEN,
+                mode,
+            )
+            self._is_fullscreen = bool(enabled)
+        except Exception:
+            pass
 
     def _extract_template_landmarks_from_image(self, image_path: str) -> dict | None:
         image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
@@ -856,6 +927,12 @@ class HandSkeletonComponent:
                 self.sign_mode.reset_to_menu()
             self.active_mode = "sign"
 
+    def _toggle_touchdesigner_mode(self) -> None:
+        if self.active_mode == "touchdesigner":
+            self.active_mode = "plain"
+        else:
+            self.active_mode = "touchdesigner"
+
     def _draw_from_results(self, frame, results):
         output = frame.copy()
         hand_count = 0
@@ -1016,7 +1093,15 @@ class HandSkeletonComponent:
         )
         pending_inference = None
 
-        cv2.namedWindow(self._window_name)
+        # Keep window flags minimal on macOS; extra GUI/aspect flags can cause
+        # internal letterboxing/padding during resize/fullscreen.
+        cv2.namedWindow(self._window_name, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(
+            self._window_name,
+            self.config.capture_width,
+            self.config.capture_height,
+        )
+
         cv2.setMouseCallback(self._window_name, self._on_mouse_event)
 
         prev_time = time.time()
@@ -1057,6 +1142,13 @@ class HandSkeletonComponent:
                 hand_points = self._extract_hand_interaction_points(
                     current_results,
                     output.shape,
+                )
+
+                self.td_bridge.send_frame(
+                    hand_points=hand_points,
+                    fps=fps,
+                    mode=self.active_mode,
+                    frame_size=(output.shape[1], output.shape[0]),
                 )
 
                 if self.active_mode == "sign" and self.sign_mode is not None:
@@ -1166,14 +1258,13 @@ class HandSkeletonComponent:
                     )
                     next_y = self._draw_pinch_counters(output)
                     self._draw_knob_states(output, next_y)
-
-                # Keep latest frame dimensions for robust mouse click mapping.
+                # Keep original frame dimensions for robust mouse click mapping.
                 self._last_output_size = (output.shape[1], output.shape[0])
                 cv2.putText(
                     output,
                     (
                         f"Mode: {self.active_mode.upper()} | "
-                        "1=toggle game 2=two-player 3=bot 4=sign r=reset"
+                        "1=toggle game 2=two-player 3=bot 4=sign 5=touchdesigner f=fullscreen r=reset"
                     ),
                     (10, output.shape[0] - 36),
                     cv2.FONT_HERSHEY_SIMPLEX,
@@ -1186,7 +1277,7 @@ class HandSkeletonComponent:
                     output,
                     (
                         "Keys: q/esc=quit, n=landmark IDs, c=counters | "
-                        "Knob: pinch thumb+index+middle | Sign: pinch/mouse click"
+                        "Knob: pinch thumb+index+middle | Sign: pinch/mouse, [ ] conf, -/+ hold | 5=TD mode"
                     ),
                     (10, output.shape[0] - 12),
                     cv2.FONT_HERSHEY_SIMPLEX,
@@ -1195,8 +1286,9 @@ class HandSkeletonComponent:
                     1,
                     cv2.LINE_AA,
                 )
-
-                cv2.imshow(self._window_name, output)
+                display_output = self._fit_output_to_window(output)
+                self._last_display_size = (display_output.shape[1], display_output.shape[0])
+                cv2.imshow(self._window_name, display_output)
                 key = cv2.waitKey(1) & 0xFF
 
                 if key in (27, ord("q")):
@@ -1215,6 +1307,18 @@ class HandSkeletonComponent:
                     self.game.set_mode("bot")
                 if key == ord("4"):
                     self._toggle_sign_mode()
+                if key == ord("5"):
+                    self._toggle_touchdesigner_mode()
+                if key in (ord("f"), ord("F")):
+                    self._set_fullscreen(not self._is_fullscreen)
+                if key == ord("[") and self.sign_mode is not None:
+                    self.sign_mode.adjust_confidence_threshold(-0.2)
+                if key == ord("]") and self.sign_mode is not None:
+                    self.sign_mode.adjust_confidence_threshold(+0.2)
+                if key in (ord("-"), ord("_")) and self.sign_mode is not None:
+                    self.sign_mode.adjust_hold_frames(-1)
+                if key in (ord("+"), ord("=")) and self.sign_mode is not None:
+                    self.sign_mode.adjust_hold_frames(+1)
                 if key in (ord("r"), ord("R")) and self.active_mode == "game":
                     self.game.reset_match()
         finally:

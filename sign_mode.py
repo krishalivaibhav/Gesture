@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections import Counter, deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping
@@ -36,7 +37,13 @@ class SignLanguageMode:
     STATE_LEARNER_RUN = "learner_run"
     STATE_PRACTICE_RUN = "practice_run"
 
-    def __init__(self, template_loader: TemplateLoader) -> None:
+    def __init__(
+        self,
+        template_loader: TemplateLoader,
+        hold_min_frames: int = 10,
+        confidence_threshold_score: float = 5.5,
+        max_custom_samples_per_letter: int = 20,
+    ) -> None:
         self.template_loader = template_loader
 
         self.state = self.STATE_MENU
@@ -44,7 +51,7 @@ class SignLanguageMode:
         self.session: PromptSession | None = None
 
         self.static_letters = STATIC_LETTERS[:]
-        self.templates: dict[str, list[float]] = {}
+        self.templates: dict[str, list[list[float]]] = {}
         self.reference_images: dict[str, object] = {}
         self.available_letters: set[str] = set()
 
@@ -60,8 +67,11 @@ class SignLanguageMode:
 
         self._candidate_letter: str | None = None
         self._candidate_frames = 0
-        self._hold_min_frames = 10
-        self._confidence_threshold_score = 5.5
+        self._hold_min_frames = max(2, int(hold_min_frames))
+        self._confidence_threshold_score = max(0.5, min(9.5, float(confidence_threshold_score)))
+        self._max_custom_samples_per_letter = max(1, int(max_custom_samples_per_letter))
+        self._recent_predictions: deque[str] = deque(maxlen=5)
+        self._min_margin_score = 0.45
         self._cooldown_frames = 0
 
         self._last_prediction = "-"
@@ -70,6 +80,24 @@ class SignLanguageMode:
 
         self._feature_weights = self._build_feature_weights()
         self._load_templates()
+
+    def adjust_confidence_threshold(self, delta: float) -> float:
+        self._confidence_threshold_score = max(
+            0.5,
+            min(9.5, self._confidence_threshold_score + float(delta)),
+        )
+        self._status_message = (
+            f"Sign confidence threshold set to {self._confidence_threshold_score:.2f}/10"
+        )
+        return self._confidence_threshold_score
+
+    def adjust_hold_frames(self, delta: int) -> int:
+        self._hold_min_frames = max(2, min(30, self._hold_min_frames + int(delta)))
+        self._status_message = f"Sign hold frames set to {self._hold_min_frames}"
+        return self._hold_min_frames
+
+    def total_template_samples(self) -> int:
+        return sum(len(samples) for samples in self.templates.values())
 
     def reset_to_menu(self) -> None:
         self.state = self.STATE_MENU
@@ -149,7 +177,7 @@ class SignLanguageMode:
                 print(f"[sign-mode] warning: failed to encode landmarks for {image_path}")
                 continue
 
-            self.templates[letter] = encoded
+            self.templates[letter] = [encoded]
             self.available_letters.add(letter)
 
             image = loaded.get("image")
@@ -164,7 +192,7 @@ class SignLanguageMode:
             )
         else:
             self._status_message = (
-                f"Loaded {len(self.templates)} sign templates. "
+                f"Loaded {len(self.templates)} letters / {self.total_template_samples()} samples. "
                 "Press 4 for Sign mode menu."
             )
             print(f"[sign-mode] loaded templates: {sorted(self.available_letters)}")
@@ -182,43 +210,69 @@ class SignLanguageMode:
             return
 
         loaded_count = 0
+        loaded_samples = 0
         for letter, vector in payload.items():
             if not isinstance(letter, str) or len(letter) != 1:
                 continue
             letter = letter.upper()
             if letter not in self.static_letters:
                 continue
-            if not isinstance(vector, list) or len(vector) != len(self._feature_weights):
+            normalized_samples = self._normalize_template_payload(vector)
+            if not normalized_samples:
                 continue
-            try:
-                normalized_vector = [float(v) for v in vector]
-            except Exception:
-                continue
-            self.templates[letter] = normalized_vector
+            existing = self.templates.get(letter, [])
+            self.templates[letter] = (existing + normalized_samples)[
+                -self._max_custom_samples_per_letter :
+            ]
             self.available_letters.add(letter)
             loaded_count += 1
+            loaded_samples += len(normalized_samples)
 
         if loaded_count > 0:
-            print(f"[sign-mode] loaded {loaded_count} custom templates")
+            print(
+                f"[sign-mode] loaded custom templates for {loaded_count} letters "
+                f"({loaded_samples} samples)"
+            )
+
+    def _normalize_template_payload(self, payload_value: object) -> list[list[float]]:
+        # Backward compatible: accept one vector per letter, or many vectors.
+        if not isinstance(payload_value, list):
+            return []
+
+        if payload_value and isinstance(payload_value[0], (int, float)):
+            payload_value = [payload_value]
+
+        normalized: list[list[float]] = []
+        for candidate in payload_value:
+            if not isinstance(candidate, list) or len(candidate) != len(self._feature_weights):
+                continue
+            try:
+                normalized.append([float(v) for v in candidate])
+            except Exception:
+                continue
+        return normalized
 
     def _save_custom_template(self, letter: str, encoded: list[float]) -> None:
         self.assets_dir.mkdir(parents=True, exist_ok=True)
 
-        payload: dict[str, list[float]] = {}
+        payload: dict[str, list[list[float]]] = {}
         if self.custom_template_path.exists():
             try:
                 existing = json.loads(self.custom_template_path.read_text(encoding="utf-8"))
                 if isinstance(existing, dict):
                     for k, v in existing.items():
-                        if isinstance(k, str) and isinstance(v, list):
-                            try:
-                                payload[k.upper()] = [float(x) for x in v]
-                            except Exception:
-                                continue
+                        if not isinstance(k, str):
+                            continue
+                        normalized_samples = self._normalize_template_payload(v)
+                        if normalized_samples:
+                            payload[k.upper()] = normalized_samples
             except Exception:
                 payload = {}
 
-        payload[letter.upper()] = [float(v) for v in encoded]
+        key = letter.upper()
+        payload.setdefault(key, [])
+        payload[key].append([float(v) for v in encoded])
+        payload[key] = payload[key][-self._max_custom_samples_per_letter :]
         self.custom_template_path.write_text(
             json.dumps(payload, indent=2, sort_keys=True),
             encoding="utf-8",
@@ -296,7 +350,10 @@ class SignLanguageMode:
         h, _ = frame.shape[:2]
         cv2.putText(
             frame,
-            f"Templates: {len(self.templates)} loaded | supported letters: A-I, K-Y",
+            (
+                f"Templates: {len(self.templates)} letters / {self.total_template_samples()} samples "
+                "| supported letters: A-I, K-Y"
+            ),
             (20, h - 92),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.55,
@@ -319,7 +376,7 @@ class SignLanguageMode:
         h, _ = frame.shape[:2]
         cv2.putText(
             frame,
-            "Use pinch or mouse click to select. Press 4 to exit Sign mode.",
+            "Use pinch/mouse click. [ ]=confidence, -/+=hold frames, 4=exit.",
             (20, h - 40),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.54,
@@ -518,18 +575,35 @@ class SignLanguageMode:
 
         best_letter = None
         best_distance = 1e9
-        for letter, template in self.templates.items():
-            dist = self._weighted_l2(encoded, template)
+        second_best_distance = 1e9
+        for letter, template_samples in self.templates.items():
+            if not template_samples:
+                continue
+            sample_distances = sorted(
+                self._weighted_l2(encoded, template)
+                for template in template_samples
+            )
+            k = min(3, len(sample_distances))
+            dist = sum(sample_distances[:k]) / float(k)
             if dist < best_distance:
+                second_best_distance = best_distance
                 best_distance = dist
                 best_letter = letter
+            elif dist < second_best_distance:
+                second_best_distance = dist
 
         if best_letter is None:
             return None, 0.0, False
 
-        confidence = math.exp(-3.0 * best_distance)
+        confidence = math.exp(-2.6 * best_distance)
         confidence_score = max(0.0, min(10.0, confidence * 10.0))
-        qualified = confidence_score >= self._confidence_threshold_score
+
+        margin = max(0.0, second_best_distance - best_distance)
+        margin_score = min(10.0, margin * 10.0)
+        qualified = (
+            confidence_score >= self._confidence_threshold_score
+            and margin_score >= self._min_margin_score
+        )
         return best_letter, confidence_score, qualified
 
     def _pick_signing_sample(
@@ -558,9 +632,16 @@ class SignLanguageMode:
 
     def _stable_letter_event(self, predicted: str | None, qualified: bool) -> str | None:
         if not qualified or predicted is None:
+            self._recent_predictions.clear()
             self._candidate_letter = None
             self._candidate_frames = 0
             return None
+
+        self._recent_predictions.append(predicted)
+        consensus_letter, consensus_count = Counter(self._recent_predictions).most_common(1)[0]
+        if consensus_count < max(2, len(self._recent_predictions) // 2):
+            return None
+        predicted = consensus_letter
 
         if predicted != self._candidate_letter:
             self._candidate_letter = predicted
@@ -956,11 +1037,16 @@ class SignLanguageMode:
             self._status_message = "Could not encode hand gesture. Try again."
             return
 
-        self.templates[target] = encoded
+        self.templates.setdefault(target, [])
+        self.templates[target].append(encoded)
+        self.templates[target] = self.templates[target][-self._max_custom_samples_per_letter :]
         self.available_letters.add(target)
         try:
             self._save_custom_template(target, encoded)
-            self._status_message = f"Captured template for '{target}' and saved for future runs."
+            sample_count = len(self.templates.get(target, []))
+            self._status_message = (
+                f"Captured '{target}' sample #{sample_count} and saved for future runs."
+            )
         except Exception as exc:
             self._status_message = f"Captured '{target}' for this run only (save failed: {exc})"
 

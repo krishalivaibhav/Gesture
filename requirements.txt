@@ -1,2 +1,3 @@
 opencv-python>=4.9.0
 mediapipe>=0.10.14
+python-osc>=1.8.3

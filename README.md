@@ -86,6 +86,8 @@ Notes:
 - `2`: switch game to `Two Player` mode
 - `3`: switch game to `Bot` mode
 - `4`: toggle `Sign Language` mode on/off
+- `[ / ]`: decrease/increase sign confidence threshold
+- `- / +`: decrease/increase sign hold frames
 - `r`: reset Ping Pong score (when game mode is active)
 
 The display is fixed to selfie-style mirror mode so your left hand appears on the left side of the screen.
@@ -159,6 +161,31 @@ See details and naming rules in:
 The matcher currently supports static letters:
 
 - `A-I` and `K-Y` (motion letters `J` and `Z` are excluded in v1)
+
+### Fine-tuning Sign Recognition
+
+The sign recognizer now supports multi-sample fine-tuning per letter.
+
+- In Sign mode, perform the target sign and click `Use This Gesture`.
+- Each capture is appended as a new sample for that letter.
+- Samples are saved to `assets/signs/alphabet/custom_templates.json` and reused next run.
+- During matching, the app uses nearest-neighbor averaging across top samples for stronger stability.
+
+Recommended workflow:
+
+1. Capture 5-15 samples per difficult letter in different wrist angles.
+2. Tune confidence with `[ / ]`.
+3. Tune temporal stability with `- / +`.
+4. Re-test in Practice mode and add more samples for commonly confused letters.
+
+Useful CLI options for sign tuning:
+
+```bash
+python hand_skeleton_component.py \
+  --sign-hold-frames 10 \
+  --sign-confidence-threshold 5.5 \
+  --sign-max-custom-samples 30
+```
 
 ## Pinch Counters
 
